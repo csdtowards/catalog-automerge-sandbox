@@ -1,0 +1,49 @@
+name: open-pr
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "git = commit with git as the App bot; api = commit via the contents API"
+        default: git
+permissions:
+  contents: read
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+      - name: commit and open PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+          VARIANT: ${{ inputs.variant }}
+          RUN: ${{ github.run_id }}
+        run: |
+          set -eux
+          BR="catalog/test-$RUN"
+          if [ "$VARIANT" = api ]; then
+            MAIN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BR" -f sha="$MAIN_SHA"
+            FILE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/config/pricing.toml?ref=$BR" --jq .sha)
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/config/pricing.toml" \
+              -f message="catalog: test $RUN (api)
+
+          Catalog-Operator: 0xtest" \
+              -f content="$(printf 'price = %s\n' "$RUN" | base64 -w0)" -f sha="$FILE_SHA" -f branch="$BR"
+          else
+            BOT_ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+            git config user.name "${SLUG}[bot]"
+            git config user.email "${BOT_ID}+${SLUG}[bot]@users.noreply.github.com"
+            git checkout -b "$BR"
+            printf 'price = %s\n' "$RUN" > config/pricing.toml
+            git commit -am "catalog: test $RUN (git)" -m "Catalog-Operator: 0xtest"
+            git push origin "$BR"
+          fi
+          gh pr create --base main --head "$BR" --title "catalog test $RUN ($VARIANT)" --body "sandbox run $RUN"
